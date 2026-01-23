@@ -1,0 +1,191 @@
+# ============================================
+# DataPilot AI Pro - Docker Compose
+# ============================================
+# Multi-service orchestration for the complete platform
+# ============================================
+
+version: '3.9'
+
+services:
+  # ===========================================
+  # 🖥️ Streamlit Frontend
+  # ===========================================
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: datapilot-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://fastapi:8000
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - fastapi
+      - redis
+    volumes:
+      - ./src/ui:/app/src/ui
+      - ./data:/app/data
+    command: streamlit run src/ui/app.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - datapilot-network
+
+  # ===========================================
+  # 🔄 FastAPI Backend
+  # ===========================================
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: datapilot-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://datapilot:datapilot@postgres:5432/datapilot
+      - REDIS_URL=redis://redis:6379
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - OLLAMA_HOST=http://ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - datapilot-network
+
+  # ===========================================
+  # 🔁 Celery Worker
+  # ===========================================
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: datapilot-worker
+    environment:
+      - DATABASE_URL=postgresql://datapilot:datapilot@postgres:5432/datapilot
+      - REDIS_URL=redis://redis:6379
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    command: celery -A src.api.tasks.celery_tasks worker --loglevel=info
+    networks:
+      - datapilot-network
+
+  # ===========================================
+  # 💾 PostgreSQL Database
+  # ===========================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: datapilot-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=datapilot
+      - POSTGRES_PASSWORD=datapilot
+      - POSTGRES_DB=datapilot
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - datapilot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datapilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # ⚡ Redis Cache
+  # ===========================================
+  redis:
+    image: redis:7-alpine
+    container_name: datapilot-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - datapilot-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # 🔍 Qdrant Vector Database
+  # ===========================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: datapilot-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - datapilot-network
+
+  # ===========================================
+  # 📊 MLflow Tracking Server
+  # ===========================================
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.15.0
+    container_name: datapilot-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - BACKEND_STORE_URI=postgresql://datapilot:datapilot@postgres:5432/mlflow
+      - ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - mlflow-data:/mlflow/artifacts
+    depends_on:
+      - postgres
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://datapilot:datapilot@postgres:5432/mlflow --default-artifact-root /mlflow/artifacts
+    networks:
+      - datapilot-network
+
+  # ===========================================
+  # 🧠 Ollama LLM Server
+  # ===========================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: datapilot-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - datapilot-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+# ===========================================
+# 📁 Volumes
+# ===========================================
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  mlflow-data:
+  ollama-data:
+
+# ===========================================
+# 🌐 Networks
+# ===========================================
+networks:
+  datapilot-network:
+    driver: bridge
