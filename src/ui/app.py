@@ -47,7 +47,7 @@ def main():
             st.success(f"Active Task: {st.session_state['task_id'][:8]}...")
     
     # Main content
-    tab1, tab2, tab3 = st.tabs(["📁 Upload", "📈 Results", "💬 Chat"])
+    tab1, tab2, tab3 = st.tabs(["Data Source", "Results", "Chat"])
     
     with tab1:
         render_upload_tab()
@@ -60,27 +60,43 @@ def main():
 
 
 def render_upload_tab():
-    """Render the file upload section."""
-    st.header("Upload Your Dataset")
-    
+    """Render the data source selection and upload section."""
+    st.header("Connect Your Data")
+
+    source_type = st.radio(
+        "Data Source",
+        ["File Upload (CSV / Excel)", "Database Connection"],
+        horizontal=True,
+    )
+
+    if source_type == "File Upload (CSV / Excel)":
+        _render_file_upload()
+    else:
+        _render_db_connect()
+
+
+def _render_file_upload():
+    """CSV and Excel file upload."""
     col1, col2 = st.columns([2, 1])
-    
+
     with col1:
         uploaded_file = st.file_uploader(
-            "Drag and drop your CSV file",
-            type=["csv"],
-            help="Upload a CSV file to begin analysis",
+            "Drag and drop your CSV or Excel file",
+            type=["csv", "xlsx", "xls"],
+            help="Upload a CSV or Excel file to begin analysis",
         )
-        
+
         if uploaded_file is not None:
             # Preview data
-            df = pd.read_csv(uploaded_file)
-            st.success(f"Loaded {len(df):,} rows × {len(df.columns)} columns")
-            
+            if uploaded_file.name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+
+            st.success(f"Loaded {len(df):,} rows x {len(df.columns)} columns from {uploaded_file.name}")
             st.dataframe(df.head(10), use_container_width=True)
-            
-            # Column info
-            with st.expander("📋 Column Information"):
+
+            with st.expander("Column Information"):
                 col_info = pd.DataFrame({
                     "Type": df.dtypes.astype(str),
                     "Non-Null": df.notna().sum(),
@@ -88,32 +104,178 @@ def render_upload_tab():
                     "Unique": df.nunique(),
                 })
                 st.dataframe(col_info, use_container_width=True)
-            
-            # Natural language prompt
+
             prompt = st.text_area(
                 "Optional: Describe what you want to analyze",
-                placeholder="e.g., 'Focus on predicting customer churn' or 'Find patterns in sales data'",
+                placeholder="e.g., 'Focus on predicting customer churn'",
                 height=100,
             )
-            
-            if st.button("🚀 Start Analysis", type="primary", use_container_width=True):
-                with st.spinner("Uploading and analyzing..."):
+
+            if st.button("Start Analysis", type="primary", use_container_width=True):
+                with st.spinner("Uploading and starting analysis..."):
                     start_analysis(uploaded_file, prompt)
-    
+
     with col2:
         st.markdown("### How it works")
         st.markdown("""
-        1. **Upload** your CSV file
+        1. **Upload** your CSV or Excel file
         2. **Describe** your analysis goal (optional)
         3. **Click** Start Analysis
         4. **View** automated insights
-        
+
         ---
-        
-        **Supported:**
-        - CSV files (UTF-8)
-        - Up to 1M rows
+
+        **Supported Formats:**
+        - CSV (UTF-8, comma-separated)
+        - Excel (.xlsx, .xls)
+        - Database tables (PostgreSQL, MySQL, SQLite)
+        - Up to 1M+ rows
         - Classification & Regression
+        """)
+
+
+def _render_db_connect():
+    """Database connection UI."""
+    st.subheader("Connect to a Database")
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        db_type = st.selectbox(
+            "Database Type",
+            ["PostgreSQL", "MySQL", "SQLite", "Other (custom URL)"],
+        )
+
+        if db_type == "PostgreSQL":
+            host = st.text_input("Host", value="localhost")
+            port = st.number_input("Port", value=5432)
+            dbname = st.text_input("Database Name")
+            user = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        elif db_type == "MySQL":
+            host = st.text_input("Host", value="localhost")
+            port = st.number_input("Port", value=3306)
+            dbname = st.text_input("Database Name")
+            user = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            connection_string = f"mysql+pymysql://{user}:{password}@{host}:{port}/{dbname}"
+        elif db_type == "SQLite":
+            db_path = st.text_input("Database File Path", placeholder="/path/to/database.db")
+            connection_string = f"sqlite:///{db_path}"
+        else:
+            connection_string = st.text_input(
+                "SQLAlchemy Connection URL",
+                placeholder="dialect+driver://user:pass@host/db",
+            )
+
+        st.text_input("Connection URL (preview)", value=connection_string, disabled=True)
+
+        if st.button("Connect & List Tables", use_container_width=True):
+            try:
+                response = requests.post(
+                    f"{API_URL}/connect-db",
+                    json={"connection_string": connection_string},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    st.success(f"Connected! Found {len(data['tables'])} tables.")
+                    st.session_state["db_tables"] = data["tables"]
+                    st.session_state["db_conn_string"] = connection_string
+                else:
+                    st.error(f"Connection failed: {response.json().get('detail')}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        # Table selection after connection
+        if "db_tables" in st.session_state:
+            table = st.selectbox("Select Table to Analyze", st.session_state["db_tables"])
+            prompt = st.text_area(
+                "Optional: Describe what you want to analyze",
+                placeholder="e.g., 'Find top revenue customers'",
+                height=80,
+            )
+
+            if st.button("Load Table & Start Analysis", type="primary", use_container_width=True):
+                with st.spinner("Loading table from database..."):
+                    try:
+                        response = requests.post(
+                            f"{API_URL}/connect-db",
+                            json={
+                                "connection_string": st.session_state["db_conn_string"],
+                                "table": table,
+                            },
+                        )
+                        if response.status_code == 200:
+                            data = response.json()
+                            st.session_state["task_id"] = data["task_id"]
+                            st.success(f"Loaded {data['rows']:,} rows from '{table}'")
+                            st.info("Switch to the Results tab to monitor progress.")
+
+                            # Trigger analysis
+                            requests.post(f"{API_URL}/analyze", json={
+                                "task_id": data["task_id"],
+                                "mode": "chat",
+                                "prompt": prompt,
+                            })
+                        else:
+                            st.error(f"Failed: {response.json().get('detail')}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        # NL-to-SQL section
+        st.markdown("---")
+        st.subheader("Natural Language SQL Query")
+        st.markdown("Ask a question about your database in plain English.")
+
+        nl_question = st.text_input(
+            "Your question",
+            placeholder="e.g., 'Show me the top 10 customers by revenue last month'",
+        )
+
+        if st.button("Run NL-to-SQL Query", use_container_width=True):
+            if not nl_question:
+                st.warning("Please enter a question.")
+            elif "db_conn_string" not in st.session_state:
+                st.warning("Connect to a database first.")
+            else:
+                with st.spinner("Generating and executing SQL..."):
+                    try:
+                        response = requests.post(
+                            f"{API_URL}/nl-sql",
+                            json={
+                                "connection_string": st.session_state["db_conn_string"],
+                                "question": nl_question,
+                            },
+                        )
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.success("Query executed successfully!")
+                            st.code(result["sql"], language="sql")
+                            st.caption(f"Explanation: {result['explanation']}")
+                            if result["results"]:
+                                st.dataframe(pd.DataFrame(result["results"]), use_container_width=True)
+                                st.caption(f"{result['row_count']} rows returned")
+                        else:
+                            st.error(f"Query failed: {response.json().get('detail')}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    with col2:
+        st.markdown("### Supported Databases")
+        st.markdown("""
+        - **PostgreSQL** — enterprise default
+        - **MySQL / MariaDB** — web applications
+        - **SQLite** — local / embedded
+        - Any **SQLAlchemy**-compatible DB
+
+        ---
+
+        ### NL-to-SQL Examples
+        - *"Show sales by region last quarter"*
+        - *"Top 5 customers by order count"*
+        - *"Find users who haven't logged in for 30 days"*
+        - *"Monthly revenue trend for 2024"*
         """)
 
 

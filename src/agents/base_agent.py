@@ -13,7 +13,8 @@ from dataclasses import dataclass
 import pandas as pd
 from loguru import logger
 
-from langchain_ollama import OllamaLLM
+import os
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
@@ -52,26 +53,27 @@ class BaseAgent(ABC):
         self,
         name: str,
         description: str,
-        model_name: str = "llama3.1",
+        model_name: str = "gpt-4",
         temperature: float = 0.1,
     ):
         """
         Initialize the base agent.
-        
+
         Args:
             name: Agent identifier name
             description: Description of agent's purpose
-            model_name: Ollama model to use
+            model_name: OpenAI model to use (default: gpt-4)
             temperature: LLM temperature for response variability
         """
         self.name = name
         self.description = description
         self.state = AgentState()
-        
-        # Initialize LLM
-        self.llm = OllamaLLM(
+
+        # Initialize LLM - OpenAI GPT-4
+        self.llm = ChatOpenAI(
             model=model_name,
             temperature=temperature,
+            api_key=os.getenv("OPENAI_API_KEY"),
         )
         
         # JSON output parser for structured responses
@@ -135,11 +137,13 @@ class BaseAgent(ABC):
         """
         try:
             response = await self.llm.ainvoke(prompt)
-            
+            # ChatOpenAI returns an AIMessage; extract text content
+            text = response.content if hasattr(response, "content") else str(response)
+
             if parse_json:
-                return self.json_parser.parse(response)
-            
-            return response
+                return self.json_parser.parse(text)
+
+            return text
             
         except Exception as e:
             logger.error(f"{self.name} LLM error: {e}")

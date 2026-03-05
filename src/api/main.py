@@ -4,11 +4,13 @@ DataPilot AI Pro - FastAPI Backend
 REST API for the data science platform.
 
 Endpoints:
-- POST /upload - Upload dataset for analysis
-- POST /analyze - Start analysis pipeline
-- GET /status/{task_id} - Check task status
-- GET /results/{task_id} - Get analysis results
-- POST /predict - Make predictions with trained model
+- POST /upload        - Upload CSV or Excel dataset for analysis
+- POST /connect-db    - Connect to a database via connection string
+- POST /analyze       - Start analysis pipeline
+- GET  /status/{id}   - Check task status
+- GET  /results/{id}  - Get analysis results
+- POST /predict       - Make predictions with trained model
+- POST /nl-sql        - Natural language to SQL query
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
@@ -48,6 +50,18 @@ class AnalysisRequest(BaseModel):
     task_id: str
     mode: str = "chat"
     prompt: Optional[str] = None
+
+
+class DatabaseConnectRequest(BaseModel):
+    """Request model for database connection."""
+    connection_string: str
+    table: Optional[str] = None  # If None, lists available tables
+
+
+class NLSQLRequest(BaseModel):
+    """Request model for natural language to SQL."""
+    connection_string: str
+    question: str
 
 
 class PredictionRequest(BaseModel):
@@ -97,40 +111,140 @@ async def health_check():
 async def upload_file(file: UploadFile = File(...)):
     """
     Upload a dataset for analysis.
-    
-    Accepts CSV files and returns a task_id for tracking.
+
+    Accepts CSV and Excel (.xlsx, .xls) files and returns a task_id for tracking.
     """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported")
-    
+    filename = file.filename or ""
+    if not (filename.endswith(".csv") or filename.endswith(".xlsx") or filename.endswith(".xls")):
+        raise HTTPException(status_code=400, detail="Only CSV and Excel files are supported")
+
     try:
-        # Read file content
         content = await file.read()
-        df = pd.read_csv(io.StringIO(content.decode("utf-8")))
-        
-        # Create task
+
+        if filename.endswith(".csv"):
+            df = pd.read_csv(io.StringIO(content.decode("utf-8")))
+        else:
+            # Excel support via openpyxl
+            df = pd.read_excel(io.BytesIO(content))
+
         task_id = str(uuid.uuid4())
         tasks[task_id] = {
             "status": "uploaded",
             "progress": 0.0,
             "data": df,
-            "filename": file.filename,
+            "filename": filename,
+            "source": "file",
             "rows": len(df),
             "columns": len(df.columns),
         }
-        
-        logger.info(f"File uploaded: {file.filename} ({len(df)} rows)")
-        
+
+        logger.info(f"File uploaded: {filename} ({len(df)} rows)")
+
         return {
             "task_id": task_id,
-            "filename": file.filename,
+            "filename": filename,
             "rows": len(df),
             "columns": len(df.columns),
             "column_names": list(df.columns),
         }
-        
+
     except Exception as e:
         logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/connect-db")
+async def connect_database(request: DatabaseConnectRequest):
+    """
+    Connect to a database and load a table as a DataFrame for analysis.
+
+    Supports any SQLAlchemy-compatible database:
+      - PostgreSQL: postgresql://user:pass@host/db
+      - MySQL:      mysql+pymysql://user:pass@host/db
+      - SQLite:     sqlite:///path/to/file.db
+
+    If no table is specified, returns the list of available tables.
+    """
+    try:
+        from sqlalchemy import create_engine, inspect, text
+
+        engine = create_engine(request.connection_string)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+
+        if not request.table:
+            return {"status": "connected", "tables": tables}
+
+        if request.table not in tables:
+            raise HTTPException(status_code=400, detail=f"Table '{request.table}' not found. Available: {tables}")
+
+        df = pd.read_sql_table(request.table, engine)
+
+        task_id = str(uuid.uuid4())
+        tasks[task_id] = {
+            "status": "uploaded",
+            "progress": 0.0,
+            "data": df,
+            "filename": f"{request.table} (database)",
+            "source": "database",
+            "connection_string": request.connection_string,
+            "rows": len(df),
+            "columns": len(df.columns),
+        }
+
+        logger.info(f"DB table loaded: {request.table} ({len(df)} rows)")
+
+        return {
+            "task_id": task_id,
+            "table": request.table,
+            "rows": len(df),
+            "columns": len(df.columns),
+            "column_names": list(df.columns),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"DB connection error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/nl-sql")
+async def natural_language_to_sql(request: NLSQLRequest):
+    """
+    Convert a natural language question to SQL and execute it.
+
+    Uses GPT-4 with dynamic schema injection and a self-correction
+    loop to generate accurate, executable SQL for any connected database.
+    """
+    try:
+        from ..agents.nl_sql_agent import NLSQLAgent
+
+        agent = NLSQLAgent(connection_string=request.connection_string)
+        result = await agent.query(request.question)
+
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        results_data = None
+        if result["results"] is not None:
+            results_data = result["results"].to_dict(orient="records")
+
+        return {
+            "question": request.question,
+            "sql": result["sql"],
+            "explanation": result["explanation"],
+            "results": results_data,
+            "row_count": result.get("row_count", 0),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"NL-SQL error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
